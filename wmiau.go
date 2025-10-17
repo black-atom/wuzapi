@@ -517,7 +517,11 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 			client.Disconnect()
 			clientManager.DeleteWhatsmeowClient(userID)
 			clientManager.DeleteMyClient(userID)
+
+			// Wait 5 seconds so we are able to send any pending disconnect / logged out events
+			time.Sleep(5000 * time.Millisecond)
 			clientManager.DeleteHTTPClient(userID)
+			
 			sqlStmt := `UPDATE users SET qrcode='', connected=0 WHERE id=$1`
 			_, err := s.db.Exec(sqlStmt, "", userID)
 			if err != nil {
