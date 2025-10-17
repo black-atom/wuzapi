@@ -4799,8 +4799,12 @@ func (s *server) DeleteUserComplete() http.HandlerFunc {
 
 		// 3. Cleanup from memory
 		clientManager.DeleteWhatsmeowClient(id)
-		clientManager.DeleteMyClient(id)
+		// Wait for any in-flight webhook goroutines to finish before deleting HTTP client
+		if c := clientManager.GetMyClient(id); c != nil {
+			c.webhookWG.Wait()
+		}
 		clientManager.DeleteHTTPClient(id)
+		clientManager.DeleteMyClient(id)
 		userinfocache.Delete(token)
 
 		// 4. Remove media files

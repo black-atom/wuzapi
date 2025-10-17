@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -39,6 +40,7 @@ type MyClient struct {
 	subscriptions  []string
 	db             *sqlx.DB
 	s              *server
+	webhookWG      sync.WaitGroup
 }
 
 func sendToGlobalWebHook(jsonData []byte, token string, userID string) {
@@ -81,18 +83,32 @@ func sendToUserWebHook(webhookurl string, path string, jsonData []byte, userID s
 	if webhookurl != "" {
 		log.Info().Str("url", webhookurl).Msg("Calling user webhook")
 		if path == "" {
-			go callHook(webhookurl, data, userID)
+			// Run webhook in goroutine tracked by the client's WaitGroup, if available
+			if c := clientManager.GetMyClient(userID); c != nil {
+				c.webhookWG.Add(1)
+				go func() {
+					defer c.webhookWG.Done()
+					callHook(webhookurl, data, userID)
+				}()
+			} else {
+				go callHook(webhookurl, data, userID)
+			}
 		} else {
-			// Create a channel to capture the error from the goroutine
-			errChan := make(chan error, 1)
-			go func() {
-				err := callHookFile(webhookurl, data, userID, path)
-				errChan <- err
-			}()
-
-			// Optionally handle the error from the channel (if needed)
-			if err := <-errChan; err != nil {
-				log.Error().Err(err).Msg("Error calling hook file")
+			// Fire webhook with file in goroutine tracked by the client's WaitGroup
+			if c := clientManager.GetMyClient(userID); c != nil {
+				c.webhookWG.Add(1)
+				go func() {
+					defer c.webhookWG.Done()
+					if err := callHookFile(webhookurl, data, userID, path); err != nil {
+						log.Error().Err(err).Msg("Error calling hook file")
+					}
+				}()
+			} else {
+				go func() {
+					if err := callHookFile(webhookurl, data, userID, path); err != nil {
+						log.Error().Err(err).Msg("Error calling hook file")
+					}
+				}()
 			}
 		}
 	} else {
@@ -183,9 +199,14 @@ func sendEventWithWebHook(mycli *MyClient, postmap map[string]interface{}, path 
 	// Call user webhook if configured
 	sendToUserWebHook(webhookurl, path, jsonData, mycli.userID, mycli.token)
 
-	// Get global webhook if configured
-	go sendToGlobalWebHook(jsonData, mycli.token, mycli.userID)
+	// Get global webhook if configured (track with WaitGroup if available)
+	mycli.webhookWG.Add(1)
+	go func() {
+		defer mycli.webhookWG.Done()
+		sendToGlobalWebHook(jsonData, mycli.token, mycli.userID)
+	}()
 
+	// Rabbit publishing is independent and fast; no need to track in WaitGroup
 	go sendToGlobalRabbit(jsonData, mycli.token, mycli.userID)
 }
 
@@ -386,7 +407,7 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 	store.DeviceProps.Os = osName
 
 	clientManager.SetWhatsmeowClient(userID, client)
-	mycli := MyClient{client, 1, userID, token, subscriptions, s.db, s}
+	mycli := MyClient{WAClient: client, eventHandlerID: 1, userID: userID, token: token, subscriptions: subscriptions, db: s.db, s: s}
 	mycli.eventHandlerID = mycli.WAClient.AddEventHandler(mycli.myEventHandler)
 
 	// CORREÇÃO: Armazenar o MyClient no clientManager
@@ -476,11 +497,9 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 							userinfocache.Set(token, v, cache.NoExpiration)
 						}
 					}
-					log.Warn().Msg("QR timeout killing channel")
-					clientManager.DeleteWhatsmeowClient(userID)
-					clientManager.DeleteMyClient(userID)
-					clientManager.DeleteHTTPClient(userID)
-					killchannel[userID] <- true
+			log.Warn().Msg("QR timeout killing channel")
+			// Signal shutdown and let the main loop handle client cleanup and HTTP client deletion
+			killchannel[userID] <- true
 				} else if evt.Event == "success" {
 					log.Info().Msg("QR pairing ok!")
 					// Clear QR code after pairing
@@ -516,12 +535,13 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 			log.Info().Str("userid", userID).Msg("Received kill signal")
 			client.Disconnect()
 			clientManager.DeleteWhatsmeowClient(userID)
+			// Wait for any in-flight webhook goroutines to complete before deleting HTTP client
+			if c := clientManager.GetMyClient(userID); c != nil {
+				c.webhookWG.Wait()
+			}
+			clientManager.DeleteHTTPClient(userID)
 			clientManager.DeleteMyClient(userID)
 
-			// Wait 5 seconds so we are able to send any pending disconnect / logged out events
-			time.Sleep(5000 * time.Millisecond)
-			clientManager.DeleteHTTPClient(userID)
-			
 			sqlStmt := `UPDATE users SET qrcode='', connected=0 WHERE id=$1`
 			_, err := s.db.Exec(sqlStmt, "", userID)
 			if err != nil {
@@ -529,7 +549,7 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 			}
 			return
 		default:
-			time.Sleep(1000 * time.Millisecond)
+			time.Sleep(time.Second)
 			//log.Info().Str("jid",textjid).Msg("Loop the loop")
 		}
 	}
