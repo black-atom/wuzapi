@@ -1,0 +1,9 @@
+{$DOMAIN} {
+  reverse_proxy wuzapi-server:8080
+
+  # Optional: if WuzAPI uses websockets, Caddy supports it automatically.
+  # Optional: increase limits if you upload big payloads
+  # request_body {
+  #   max_size 50MB
+  # }
+}
