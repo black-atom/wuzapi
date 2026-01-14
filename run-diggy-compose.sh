@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# If not running under bash (e.g., invoked via sh/zsh), re-exec with bash.
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec /usr/bin/env bash "$0" "$@"
+fi
 set -Eeuo pipefail
 
 # Run and manage the services defined in diggy-docker-compose.yml
