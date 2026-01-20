@@ -22,6 +22,11 @@ services:
     networks:
       - wuzapi-network
     restart: on-failure
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1g"
+        max-file: "1"
 
   # HTTPS reverse proxy
   caddy:
