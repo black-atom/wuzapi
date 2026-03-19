@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${DB_USER:-wuzapi}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-wuzapi}
+      POSTGRES_DB: ${DB_NAME:-wuzapi}
+      TZ: ${TZ:-America/Sao_Paulo}
+      PGTZ: ${TZ:-America/Sao_Paulo}
+    volumes:
+      - diggy_db_data:/var/lib/postgresql/data
+    networks:
+      - wuzapi-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-wuzapi} -d ${DB_NAME:-wuzapi}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  message-history-truncate-cron:
+    build:
+      context: .
+      dockerfile: docker/postgres-maintenance/Dockerfile
+    environment:
+      DB_HOST: db
+      DB_PORT: ${DB_PORT:-5432}
+      DB_USER: ${DB_USER:-wuzapi}
+      DB_PASSWORD: ${DB_PASSWORD:-wuzapi}
+      DB_NAME: ${DB_NAME:-wuzapi}
+      TZ: ${TZ:-America/Sao_Paulo}
+      MESSAGE_HISTORY_TRUNCATE_CRON: ${MESSAGE_HISTORY_TRUNCATE_CRON:-0 3 * * *}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - wuzapi-network
+    restart: unless-stopped
+
+networks:
+  wuzapi-network:
+    driver: bridge
+
+volumes:
+  diggy_db_data:
