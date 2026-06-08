@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -38,9 +39,27 @@ type MyClient struct {
 	eventHandlerID uint32
 	userID         string
 	token          string
-	subscriptions  []string
 	db             *sqlx.DB
 	s              *server
+}
+
+// safeGo runs fn in a new goroutine with a defer recover so a panic inside
+// fire-and-forget side-effects (webhook delivery, MQ push) cannot crash
+// the whole process. Losing one delivery is preferable to taking wuzapi
+// down for every connected user.
+func safeGo(name string, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error().
+					Str("goroutine", name).
+					Interface("panic", r).
+					Str("stack", string(debug.Stack())).
+					Msg("panic recovered in goroutine")
+			}
+		}()
+		fn()
+	}()
 }
 
 // ensureS3ClientForUser loads S3 config from DB and initializes client if not already present (lazy init for reconnect-after-restart)
@@ -92,17 +111,9 @@ func sendToUserWebHookWithHmac(webhookurl string, path string, jsonData []byte, 
 		log.Info().Str("url", webhookurl).Msg("Calling user webhook")
 
 		if path == "" {
-			go callHookWithHmac(webhookurl, data, userID, encryptedHmacKey)
+			safeGo("callHookWithHmac", func() { callHookWithHmac(webhookurl, data, userID, encryptedHmacKey) })
 		} else {
-			// Create a channel to capture the error from the goroutine
-			errChan := make(chan error, 1)
-			go func() {
-				err := callHookFileWithHmac(webhookurl, data, userID, path, encryptedHmacKey)
-				errChan <- err
-			}()
-
-			// Optionally handle the error from the channel (if needed)
-			if err := <-errChan; err != nil {
+			if err := callHookFileWithHmac(webhookurl, data, userID, path, encryptedHmacKey); err != nil {
 				log.Error().Err(err).Msg("Error calling hook file")
 			}
 		}
@@ -138,9 +149,6 @@ func updateAndGetUserSubscriptions(mycli *MyClient) ([]string, error) {
 			}
 		}
 	}
-
-	// Update the client subscriptions
-	mycli.subscriptions = subscribedEvents
 
 	return subscribedEvents, nil
 }
@@ -213,9 +221,9 @@ func sendEventWithWebHook(mycli *MyClient, postmap map[string]interface{}, path 
 	sendToUserWebHookWithHmac(webhookurl, path, jsonData, mycli.userID, mycli.token, encryptedHmacKey)
 
 	// Get global webhook if configured
-	go sendToGlobalWebHook(jsonData, mycli.token, mycli.userID)
+	safeGo("sendToGlobalWebHook", func() { sendToGlobalWebHook(jsonData, mycli.token, mycli.userID) })
 
-	go sendToGlobalRabbit(jsonData, mycli.token, mycli.userID)
+	safeGo("sendToGlobalRabbit", func() { sendToGlobalRabbit(jsonData, mycli.token, mycli.userID) })
 }
 
 func checkIfSubscribedToEvent(subscribedEvents []string, eventType string, userId string) bool {
@@ -295,8 +303,9 @@ func (s *server) connectOnStartup() {
 			}
 			eventstring := strings.Join(subscribedEvents, ",")
 			log.Info().Str("events", eventstring).Str("jid", jid).Msg("Attempt to connect")
-			killchannel[txtid] = make(chan bool, 1)
-			go s.startClient(txtid, jid, token, subscribedEvents)
+			kill := make(chan bool, 1)
+			setKillChannel(txtid, kill)
+			go s.startClient(txtid, jid, token, kill)
 
 			// Initialize S3 client if configured
 			go func(userID string) {
@@ -387,7 +396,7 @@ func getPlatformTypeEnum(platformType string) *waCompanionReg.DeviceProps_Platfo
 	}
 }
 
-func (s *server) startClient(userID string, textjid string, token string, subscriptions []string) {
+func (s *server) startClient(userID string, textjid string, token string, kill chan bool) {
 	log.Info().Str("userid", userID).Str("jid", textjid).Msg("Starting websocket connection to Whatsapp")
 
 	// Connection retry constants
@@ -431,7 +440,14 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 	store.DeviceProps.PlatformType = getPlatformTypeEnum(*platformType)
 	store.DeviceProps.Os = osName
 
-	mycli := MyClient{client, 1, userID, token, subscriptions, s.db, s}
+	mycli := MyClient{
+		WAClient:       client,
+		eventHandlerID: 1,
+		userID:         userID,
+		token:          token,
+		db:             s.db,
+		s:              s,
+	}
 	mycli.eventHandlerID = mycli.WAClient.AddEventHandler(mycli.myEventHandler)
 
 	// Store the MyClient in clientManager
@@ -556,10 +572,7 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 					clientManager.DeleteWhatsmeowClient(userID)
 					clientManager.DeleteMyClient(userID)
 					clientManager.DeleteHTTPClient(userID)
-					select {
-					case killchannel[userID] <- true:
-					default:
-					}
+					signalKill(userID)
 				} else if evt.Event == "success" {
 					log.Info().Msg("QR pairing ok!")
 					// Clear QR code after pairing
@@ -643,27 +656,20 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 		}
 	}
 
-	// Keep connected client live until disconnected/killed
-	for {
-		select {
-		case <-killchannel[userID]:
-			log.Info().Str("userid", userID).Msg("Received kill signal")
-			client.Disconnect()
-			clientManager.DeleteWhatsmeowClient(userID)
-			clientManager.DeleteMyClient(userID)
-			clientManager.DeleteHTTPClient(userID)
-			sqlStmt := `UPDATE users SET qrcode='', connected=0 WHERE id=$1`
-			_, err := s.db.Exec(sqlStmt, userID)
-			if err != nil {
-				log.Error().Err(err).Msg(sqlStmt)
-			}
-			delete(killchannel, userID)
-			return
-		default:
-			time.Sleep(1000 * time.Millisecond)
-			//log.Info().Str("jid",textjid).Msg("Loop the loop")
-		}
+	// Keep the session goroutine alive until a kill signal arrives. Block on the
+	// channel (passed in directly, so this goroutine always owns its own channel
+	// even if a reconnect replaces the map entry) instead of polling — this parks
+	// the goroutine with zero CPU and no per-second mutex access.
+	<-kill
+	log.Info().Str("userid", userID).Msg("Received kill signal")
+	client.Disconnect()
+	clientManager.DeleteWhatsmeowClient(userID)
+	clientManager.DeleteMyClient(userID)
+	clientManager.DeleteHTTPClient(userID)
+	if _, err := s.db.Exec(`UPDATE users SET qrcode='', connected=0 WHERE id=$1`, userID); err != nil {
+		log.Error().Err(err).Msg("failed to mark user disconnected on kill")
 	}
+	deleteKillChannel(userID, kill)
 }
 
 func fileToBase64(filepath string) (string, string, error) {
@@ -1428,10 +1434,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		log.Info().Str("reason", evt.Reason.String()).Msg("Logged out")
 		defer func() {
 			// Use a non-blocking send to prevent a deadlock if the receiver has already terminated.
-			select {
-			case killchannel[mycli.userID] <- true:
-			default:
-			}
+			signalKill(mycli.userID)
 		}()
 		sqlStmt := `UPDATE users SET connected=0 WHERE id=$1`
 		_, err := mycli.db.Exec(sqlStmt, mycli.userID)
