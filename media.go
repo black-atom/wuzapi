@@ -5,6 +5,7 @@ import (
 	"mime"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -17,7 +18,15 @@ const (
 	downloadTimeoutDocument = 10 * time.Minute
 	downloadTimeoutVideo    = 10 * time.Minute
 	downloadTimeoutSticker  = 1 * time.Minute
+	crmInstanceNamePrefix   = "crm_"
 )
+
+// shouldDownloadHeavyMedia is true only for CRM instances, whose names are
+// prefixed with "crm_". Other instances skip inbound image and video
+// downloads to avoid pulling large media for every incoming message.
+func shouldDownloadHeavyMedia(instanceName string) bool {
+	return strings.HasPrefix(instanceName, crmInstanceNamePrefix)
+}
 
 type mediaS3Config struct {
 	Enabled       string

@@ -1207,10 +1207,22 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 				MediaDelivery: s3Config.MediaDelivery,
 			}
 
+			instanceName := ""
+			if found {
+				instanceName = myuserinfo.(Values).Get("Name")
+			}
+
 			if img := evt.Message.GetImageMessage(); img != nil {
-				mycli.processMedia(img, img.GetMimetype(), ".jpg",
-					downloadTimeoutImage, isIncoming, chatJID,
-					evt.Info.ID, s3cfg, postmap, nil)
+				if shouldDownloadHeavyMedia(instanceName) {
+					mycli.processMedia(img, img.GetMimetype(), ".jpg",
+						downloadTimeoutImage, isIncoming, chatJID,
+						evt.Info.ID, s3cfg, postmap, nil)
+				} else {
+					log.Debug().
+						Str("instanceName", instanceName).
+						Str("messageID", evt.Info.ID).
+						Msg("Skipping image download; instance name does not start with crm_")
+				}
 			}
 
 			if audio := evt.Message.GetAudioMessage(); audio != nil {
@@ -1230,9 +1242,16 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			}
 
 			if video := evt.Message.GetVideoMessage(); video != nil {
-				mycli.processMedia(video, video.GetMimetype(), ".mp4",
-					downloadTimeoutVideo, isIncoming, chatJID,
-					evt.Info.ID, s3cfg, postmap, nil)
+				if shouldDownloadHeavyMedia(instanceName) {
+					mycli.processMedia(video, video.GetMimetype(), ".mp4",
+						downloadTimeoutVideo, isIncoming, chatJID,
+						evt.Info.ID, s3cfg, postmap, nil)
+				} else {
+					log.Debug().
+						Str("instanceName", instanceName).
+						Str("messageID", evt.Info.ID).
+						Msg("Skipping video download; instance name does not start with crm_")
+				}
 			}
 
 			if sticker := evt.Message.GetStickerMessage(); sticker != nil {
