@@ -18,14 +18,13 @@ const (
 	downloadTimeoutDocument = 10 * time.Minute
 	downloadTimeoutVideo    = 10 * time.Minute
 	downloadTimeoutSticker  = 1 * time.Minute
-	crmInstanceNamePrefix   = "crm_"
 )
 
-// shouldDownloadHeavyMedia is true only for CRM instances, whose names are
-// prefixed with "crm_". Other instances skip inbound image and video
-// downloads to avoid pulling large media for every incoming message.
-func shouldDownloadHeavyMedia(instanceName string) bool {
-	return strings.HasPrefix(instanceName, crmInstanceNamePrefix)
+// isCRMInstance is true when the instance name contains "crm". Non-CRM
+// instances only download inbound audio; images, videos, documents and
+// stickers are skipped.
+func isCRMInstance(instanceName string) bool {
+	return strings.Contains(instanceName, "crm")
 }
 
 type mediaS3Config struct {
@@ -111,5 +110,5 @@ func (mycli *MyClient) processMedia(
 		postmap[k] = v
 	}
 
-	log.Info().Str("path", tmpPath).Msg("Media processed")
+	log.Info().Str("path", tmpPath).Str("mimeType", mimeType).Msg("Media processed")
 }

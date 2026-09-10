@@ -1212,8 +1212,10 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 				instanceName = myuserinfo.(Values).Get("Name")
 			}
 
+			downloadNonAudio := isCRMInstance(instanceName)
+
 			if img := evt.Message.GetImageMessage(); img != nil {
-				if shouldDownloadHeavyMedia(instanceName) {
+				if downloadNonAudio {
 					mycli.processMedia(img, img.GetMimetype(), ".jpg",
 						downloadTimeoutImage, isIncoming, chatJID,
 						evt.Info.ID, s3cfg, postmap, nil)
@@ -1221,7 +1223,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 					log.Debug().
 						Str("instanceName", instanceName).
 						Str("messageID", evt.Info.ID).
-						Msg("Skipping image download; instance name does not start with crm_")
+						Msg("Skipping image download; instance name does not contain crm")
 				}
 			}
 
@@ -1232,17 +1234,25 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			}
 
 			if doc := evt.Message.GetDocumentMessage(); doc != nil {
-				ext := ".bin"
-				if doc.FileName != nil {
-					ext = filepath.Ext(*doc.FileName)
+				if downloadNonAudio {
+					ext := ".bin"
+					if doc.FileName != nil {
+						ext = filepath.Ext(*doc.FileName)
+					}
+					mycli.processMedia(doc, doc.GetMimetype(), ext,
+						downloadTimeoutDocument, isIncoming, chatJID,
+						evt.Info.ID, s3cfg, postmap, nil)
+				} else {
+					log.Debug().
+						Str("instanceName", instanceName).
+						Str("messageID", evt.Info.ID).
+						Str("mimeType", doc.GetMimetype()).
+						Msg("Skipping document download; instance name does not contain crm")
 				}
-				mycli.processMedia(doc, doc.GetMimetype(), ext,
-					downloadTimeoutDocument, isIncoming, chatJID,
-					evt.Info.ID, s3cfg, postmap, nil)
 			}
 
 			if video := evt.Message.GetVideoMessage(); video != nil {
-				if shouldDownloadHeavyMedia(instanceName) {
+				if downloadNonAudio {
 					mycli.processMedia(video, video.GetMimetype(), ".mp4",
 						downloadTimeoutVideo, isIncoming, chatJID,
 						evt.Info.ID, s3cfg, postmap, nil)
@@ -1250,17 +1260,24 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 					log.Debug().
 						Str("instanceName", instanceName).
 						Str("messageID", evt.Info.ID).
-						Msg("Skipping video download; instance name does not start with crm_")
+						Msg("Skipping video download; instance name does not contain crm")
 				}
 			}
 
 			if sticker := evt.Message.GetStickerMessage(); sticker != nil {
-				mycli.processMedia(sticker, sticker.GetMimetype(), ".webp",
-					downloadTimeoutSticker, isIncoming, chatJID,
-					evt.Info.ID, s3cfg, postmap, map[string]interface{}{
-						"isSticker":       true,
-						"stickerAnimated": sticker.GetIsAnimated(),
-					})
+				if downloadNonAudio {
+					mycli.processMedia(sticker, sticker.GetMimetype(), ".webp",
+						downloadTimeoutSticker, isIncoming, chatJID,
+						evt.Info.ID, s3cfg, postmap, map[string]interface{}{
+							"isSticker":       true,
+							"stickerAnimated": sticker.GetIsAnimated(),
+						})
+				} else {
+					log.Debug().
+						Str("instanceName", instanceName).
+						Str("messageID", evt.Info.ID).
+						Msg("Skipping sticker download; instance name does not contain crm")
+				}
 			}
 		}
 
