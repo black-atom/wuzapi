@@ -57,6 +57,11 @@ func (s *server) routes() {
 	adminRoutes.Handle("/users/{id}", s.EditUser()).Methods("PUT")
 	adminRoutes.Handle("/users/{id}", s.DeleteUser()).Methods("DELETE")
 	adminRoutes.Handle("/users/{id}/full", s.DeleteUserComplete()).Methods("DELETE")
+	adminRoutes.Handle("/users/{id}/proxy-pool/release", s.ReleaseUserProxyPool()).Methods("POST")
+	adminRoutes.Handle("/proxy-pool", s.ListProxyPool()).Methods("GET")
+	adminRoutes.Handle("/proxy-pool", s.AddProxyPoolEntry()).Methods("POST")
+	adminRoutes.Handle("/proxy-pool/{id}", s.EditProxyPoolEntry()).Methods("PUT")
+	adminRoutes.Handle("/proxy-pool/{id}", s.DeleteProxyPoolEntry()).Methods("DELETE")
 
 	c := alice.New()
 	c = c.Append(s.authalice)
@@ -171,6 +176,9 @@ func (s *server) routes() {
 	s.router.Handle("/group/joinapprovalmode", c.Then(s.SetGroupJoinApprovalMode())).Methods("POST")
 
 	s.router.Handle("/newsletter/list", c.Then(s.ListNewsletter())).Methods("GET")
+	s.router.Handle("/newsletter/join", c.Then(s.NewsletterJoin())).Methods("POST")
+	s.router.Handle("/newsletter/leave", c.Then(s.NewsletterLeave())).Methods("POST")
+	s.router.Handle("/newsletter/mute", c.Then(s.NewsletterMute())).Methods("POST")
 
 	s.router.PathPrefix("/").Handler(http.FileServer(http.Dir(exPath + "/static/")))
 }

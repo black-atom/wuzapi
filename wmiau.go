@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -27,6 +26,7 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -204,7 +204,10 @@ func sendToUserWebHookWithHmac(webhookurl string, path string, jsonData []byte, 
 			}
 		}
 	} else {
-		log.Warn().Str("userid", userID).Msg("No webhook set for user")
+		// Debug, not Warn: a session with no webhook configured is a supported
+		// setup (RabbitMQ-only, or polling), not a problem to report once per
+		// event.
+		log.Debug().Str("userid", userID).Msg("No webhook set for user")
 	}
 }
 
@@ -284,6 +287,11 @@ func sendEventWithWebHook(mycli *MyClient, postmap map[string]interface{}, path 
 		return
 	}
 
+	if _, ok := postmap["base64"].(*mediaFile); ok {
+		sendMediaEvent(mycli, postmap, webhookurl)
+		return
+	}
+
 	// Prepare webhook data
 	jsonData, err := json.Marshal(postmap)
 	if err != nil {
@@ -314,7 +322,12 @@ func sendEventWithWebHook(mycli *MyClient, postmap map[string]interface{}, path 
 
 func checkIfSubscribedToEvent(subscribedEvents []string, eventType string, userId string) bool {
 	if !Find(subscribedEvents, eventType) && !Find(subscribedEvents, "All") {
-		log.Warn().
+		// Debug, not Warn: subscribing to a subset of the events is the normal
+		// setup, so this fires once per discarded event. On a 150-session
+		// instance these two notices were ~90% of every line left at
+		// LOG_LEVEL=warn, rotating the log file every couple of minutes and
+		// taking the real warnings with them.
+		log.Debug().
 			Str("type", eventType).
 			Strs("subscribedEvents", subscribedEvents).
 			Str("userID", userId).
@@ -389,8 +402,11 @@ func (s *server) connectOnStartup() {
 			}
 			eventstring := strings.Join(subscribedEvents, ",")
 			log.Info().Str("events", eventstring).Str("jid", jid).Msg("Attempt to connect")
-			kill := make(chan bool, 1)
-			setKillChannel(txtid, kill)
+			kill, _, err := s.prepareClientStart(txtid, false)
+			if err != nil {
+				log.Warn().Err(err).Str("user_id", txtid).Msg("Skipping startup reconnect")
+				continue
+			}
 			go s.startClient(txtid, jid, token, kill)
 
 			// Initialize S3 client if configured
@@ -607,13 +623,17 @@ func getPlatformTypeEnum(platformType string) *waCompanionReg.DeviceProps_Platfo
 }
 
 func (s *server) startClient(userID string, textjid string, token string, kill chan bool) {
+	// Release the reservation on every exit, including failed connection setup.
+	defer deleteKillChannel(userID, kill)
+	ctx, cancel := sessionContext(kill)
+	defer cancel()
 	log.Info().Str("userid", userID).Str("jid", textjid).Msg("Starting websocket connection to Whatsapp")
 
 	// Connection retry constants
 	const maxConnectionRetries = 3
 	const connectionRetryBaseWait = 5 * time.Second
 
-	deviceStore, resolvedJID := s.resolveDeviceStore(context.Background(), textjid)
+	deviceStore, resolvedJID := s.resolveDeviceStore(ctx, textjid)
 	s.syncUserJID(userID, token, textjid, resolvedJID)
 
 	var err error
@@ -627,12 +647,23 @@ func (s *server) startClient(userID string, textjid string, token string, kill c
 	} else {
 		client = whatsmeow.NewClient(deviceStore, nil)
 	}
+	// Stop all connection work and clean up before making the slot releasable,
+	// including on QR setup errors and exhausted connection retries.
+	defer func() {
+		cancel()
+		client.Disconnect()
+		clientManager.DeleteWhatsmeowClient(userID)
+		clientManager.DeleteMyClient(userID)
+		clientManager.DeleteHTTPClient(userID)
+		if _, err := s.db.Exec(`UPDATE users SET qrcode='', connected=0 WHERE id=$1`, userID); err != nil {
+			log.Error().Err(err).Msg("failed to mark user disconnected on shutdown")
+		}
+	}()
 
 	// Now we can use the client with the manager
 	clientManager.SetWhatsmeowClient(userID, client)
 
-	store.DeviceProps.PlatformType = getPlatformTypeEnum(*platformType)
-	store.DeviceProps.Os = osName
+	s.configureHistorySyncClient(client, userID)
 
 	mycli := MyClient{
 		WAClient:       client,
@@ -708,7 +739,7 @@ func (s *server) startClient(userID string, textjid string, token string, kill c
 
 	if client.Store.ID == nil {
 		// No ID stored, new login
-		qrChan, err := client.GetQRChannel(context.Background())
+		qrChan, err := client.GetQRChannel(ctx)
 		if err != nil {
 			// This error means that we're already logged in, so ignore it.
 			if !errors.Is(err, whatsmeow.ErrQRStoreContainsID) {
@@ -716,7 +747,7 @@ func (s *server) startClient(userID string, textjid string, token string, kill c
 				return
 			}
 		} else {
-			err = client.Connect() // Must connect to generate QR code
+			err = client.ConnectContext(ctx) // Must connect to generate QR code
 			if err != nil {
 				log.Error().Err(err).Msg("Failed to connect client")
 				return
@@ -774,9 +805,6 @@ func (s *server) startClient(userID string, textjid string, token string, kill c
 						}
 					}
 					log.Warn().Msg("QR timeout killing channel")
-					clientManager.DeleteWhatsmeowClient(userID)
-					clientManager.DeleteMyClient(userID)
-					clientManager.DeleteHTTPClient(userID)
 					signalKill(userID)
 				} else if evt.Event == "success" {
 					log.Info().Msg("QR pairing ok!")
@@ -857,10 +885,19 @@ func (s *server) startClient(userID string, textjid string, token string, kill c
 					Int("max_retries", maxConnectionRetries).
 					Dur("wait_time", waitTime).
 					Msg("Retrying connection after delay")
-				time.Sleep(waitTime)
+				timer := time.NewTimer(waitTime)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
 			}
 
-			err = client.Connect()
+			err = client.ConnectContext(ctx)
+			if ctx.Err() != nil {
+				return
+			}
 			if err == nil {
 				log.Info().
 					Int("attempt", attempt+1).
@@ -883,16 +920,6 @@ func (s *server) startClient(userID string, textjid string, token string, kill c
 				Int("attempts", maxConnectionRetries).
 				Msg("Failed to connect to WhatsApp after all retry attempts")
 
-			clientManager.DeleteWhatsmeowClient(userID)
-			clientManager.DeleteMyClient(userID)
-			clientManager.DeleteHTTPClient(userID)
-
-			sqlStmt := `UPDATE users SET qrcode='', connected=0 WHERE id=$1`
-			_, dbErr := s.db.Exec(sqlStmt, userID)
-			if dbErr != nil {
-				log.Error().Err(dbErr).Msg("Failed to update user status after connection error")
-			}
-
 			// Use the existing mycli instance from outer scope
 			postmap := make(map[string]interface{})
 			postmap["event"] = "ConnectFailure"
@@ -906,47 +933,44 @@ func (s *server) startClient(userID string, textjid string, token string, kill c
 		}
 	}
 
-	// Keep the session goroutine alive until a kill signal arrives. Block on the
-	// channel (passed in directly, so this goroutine always owns its own channel
-	// even if a reconnect replaces the map entry) instead of polling — this parks
-	// the goroutine with zero CPU and no per-second mutex access.
-	<-kill
-	log.Info().Str("userid", userID).Msg("Received kill signal")
-	client.Disconnect()
-	clientManager.DeleteWhatsmeowClient(userID)
-	clientManager.DeleteMyClient(userID)
-	clientManager.DeleteHTTPClient(userID)
-	if _, err := s.db.Exec(`UPDATE users SET qrcode='', connected=0 WHERE id=$1`, userID); err != nil {
-		log.Error().Err(err).Msg("failed to mark user disconnected on kill")
+	// The context watches this goroutine's own kill channel. Keep ownership
+	// through temporary disconnections until an explicit shutdown arrives.
+	if *socketRecoveryEnabled && client.Store.ID != nil {
+		recovery := newSocketRecovery(ctx, cancel, client)
+		if clientManager.registerSocketRecovery(userID, recovery) {
+			defer clientManager.removeSocketRecovery(userID, recovery)
+			recovery.run(userID, socketRecoveryGrace)
+		}
 	}
-	deleteKillChannel(userID, kill)
+	<-ctx.Done()
+	log.Info().Str("userid", userID).Msg("Received kill signal")
 }
 
-func fileToBase64(filepath string) (string, string, error) {
-	data, err := os.ReadFile(filepath)
+func (mycli *MyClient) sendAutomaticPresence() {
+	err := mycli.WAClient.SendPresence(context.Background(), automaticPresence)
 	if err != nil {
-		return "", "", err
+		log.Warn().Err(err).Str("presence", string(automaticPresence)).Msg("Failed to send automatic presence")
+	} else {
+		log.Info().Str("presence", string(automaticPresence)).Msg("Set automatic presence")
 	}
-	mimeType := http.DetectContentType(data)
-	return base64.StdEncoding.EncodeToString(data), mimeType, nil
 }
 
 func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	txtid := mycli.userID
 	postmap := make(map[string]interface{})
 	postmap["event"] = rawEvt
+	defer func() {
+		if media, ok := postmap["base64"].(*mediaFile); ok {
+			media.Close()
+		}
+	}()
 	dowebhook := 0
 	path := ""
 
 	switch evt := rawEvt.(type) {
 	case *events.AppStateSyncComplete:
 		if len(mycli.WAClient.Store.PushName) > 0 && evt.Name == appstate.WAPatchCriticalBlock {
-			err := mycli.WAClient.SendPresence(context.Background(), types.PresenceAvailable)
-			if err != nil {
-				log.Warn().Err(err).Msg("Failed to send available presence")
-			} else {
-				log.Info().Msg("Marked self as available")
-			}
+			mycli.sendAutomaticPresence()
 		}
 	case *events.Connected, *events.PushNameSetting:
 		postmap["type"] = "Connected"
@@ -954,16 +978,11 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		if len(mycli.WAClient.Store.PushName) == 0 {
 			break
 		}
-		// Send presence available when connecting and when the pushname is changed.
-		// This makes sure that outgoing messages always have the right pushname.
-		err := mycli.WAClient.SendPresence(context.Background(), types.PresenceAvailable)
-		if err != nil {
-			log.Warn().Err(err).Msg("Failed to send available presence")
-		} else {
-			log.Info().Msg("Marked self as available")
-		}
+		// Announce the push name with the configured presence when connecting and
+		// when the push name changes.
+		mycli.sendAutomaticPresence()
 		sqlStmt := `UPDATE users SET connected=1 WHERE id=$1`
-		_, err = mycli.db.Exec(sqlStmt, mycli.userID)
+		_, err := mycli.db.Exec(sqlStmt, mycli.userID)
 		if err != nil {
 			log.Error().Err(err).Msg(sqlStmt)
 			return
@@ -1005,87 +1024,6 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			log.Info().Str("jid", jidStr).Str("userid", txtid).Str("token", token).Msg("User information set")
 		}
 
-		// Check if automatic history sync is enabled and trigger it after QR code is scanned
-		var daysToSyncHistory int
-		query := "SELECT COALESCE(days_to_sync_history, 0) FROM users WHERE id=$1"
-		query = mycli.db.Rebind(query)
-		err = mycli.db.Get(&daysToSyncHistory, query, mycli.userID)
-		if err != nil {
-			log.Warn().Err(err).Str("userID", mycli.userID).Msg("Failed to get days_to_sync_history from database")
-		} else if daysToSyncHistory > 0 {
-			// Trigger history sync in a goroutine to avoid blocking
-			// Wait a bit for the connection to be fully established
-			go func() {
-				time.Sleep(2 * time.Second) // Give WhatsApp time to fully establish connection
-
-				log.Info().
-					Str("userID", mycli.userID).
-					Int("days", daysToSyncHistory).
-					Msg("Triggering automatic history sync after QR code scan")
-
-				// Use the SyncWhatsAppHistory logic but for a single user
-				// Calculate message count based on days (estimate: 15 messages per day)
-				count := daysToSyncHistory * 15
-				if count > 500 {
-					count = 500 // WhatsApp limit
-				}
-				if count < 50 {
-					count = 50 // Minimum reasonable count
-				}
-
-				// Get chats from WhatsApp (contacts and groups)
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-
-				var chatJIDs []string
-
-				// Get all contacts
-				contacts, err := mycli.WAClient.Store.Contacts.GetAllContacts(ctx)
-				if err != nil {
-					log.Error().Err(err).Str("userID", mycli.userID).Msg("Failed to get contacts for history sync")
-				} else {
-					for jid := range contacts {
-						chatJIDs = append(chatJIDs, jid.String())
-					}
-				}
-
-				// Get all groups
-				groups, err := mycli.WAClient.GetJoinedGroups(ctx)
-				if err != nil {
-					log.Error().Err(err).Str("userID", mycli.userID).Msg("Failed to get groups for history sync")
-				} else {
-					for _, group := range groups {
-						chatJIDs = append(chatJIDs, group.JID.String())
-					}
-				}
-
-				// Sync each chat with a small delay between requests
-				for _, chatJIDStr := range chatJIDs {
-					chatJID, err := types.ParseJID(chatJIDStr)
-					if err != nil {
-						log.Warn().Err(err).Str("chatJID", chatJIDStr).Msg("Failed to parse chat JID, skipping")
-						continue
-					}
-
-					// Use the syncHistoryForChat function from handlers.go
-					err = mycli.s.syncHistoryForChat(context.Background(), mycli.userID, chatJID, count)
-					if err != nil {
-						log.Warn().Err(err).Str("chatJID", chatJIDStr).Msg("Failed to sync history for chat")
-					} else {
-						log.Info().Str("chatJID", chatJIDStr).Int("count", count).Msg("History sync request sent for chat")
-					}
-
-					// Small delay between requests to avoid overwhelming WhatsApp
-					time.Sleep(100 * time.Millisecond)
-				}
-
-				log.Info().
-					Str("userID", mycli.userID).
-					Int("days", daysToSyncHistory).
-					Int("chatsSynced", len(chatJIDs)).
-					Msg("Automatic history sync completed after QR code scan")
-			}()
-		}
 	case *events.StreamReplaced:
 		log.Info().Msg("Received StreamReplaced event")
 		return
@@ -1131,7 +1069,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			metaParts = append(metaParts, "ephemeral")
 		}
 
-		log.Info().Str("id", evt.Info.ID).Str("source", evt.Info.SourceString()).Str("parts", strings.Join(metaParts, ", ")).Msg("Message Received")
+		log.Debug().Str("id", evt.Info.ID).Str("source", evt.Info.SourceString()).Str("parts", strings.Join(metaParts, ", ")).Msg("Message Received")
 
 		// If this is a poll vote, decrypt the E2E-encrypted payload so the
 		// webhook can expose which options were selected. Votes arrive as
@@ -1176,24 +1114,24 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 				}
 			}
 		}
-    
-    if encMessage := evt.Message.GetSecretEncryptedMessage(); encMessage != nil {
-        decrypted, derr := mycli.WAClient.DecryptSecretEncryptedMessage(context.Background(), evt)
-        if derr != nil {
-            log.Warn().
-                Err(derr).
-                Str("messageID", evt.Info.ID).
-                Str("secretEncType", encMessage.GetSecretEncType().String()).
-                Msg("DecryptSecretEncryptedMessage failed")
-        } else if decrypted != nil {
-            log.Info().
-                Str("messageID", evt.Info.ID).
-                Str("secretEncType", encMessage.GetSecretEncType().String()).
-                Msg("Decrypted secretEncryptedMessage; swapping evt.Message")
-                evt.Message = decrypted
-        }
-    }
-    
+
+		if encMessage := evt.Message.GetSecretEncryptedMessage(); encMessage != nil {
+			decrypted, derr := mycli.WAClient.DecryptSecretEncryptedMessage(context.Background(), evt)
+			if derr != nil {
+				log.Warn().
+					Err(derr).
+					Str("messageID", evt.Info.ID).
+					Str("secretEncType", encMessage.GetSecretEncType().String()).
+					Msg("DecryptSecretEncryptedMessage failed")
+			} else if decrypted != nil {
+				log.Info().
+					Str("messageID", evt.Info.ID).
+					Str("secretEncType", encMessage.GetSecretEncType().String()).
+					Msg("Decrypted secretEncryptedMessage; swapping evt.Message")
+				evt.Message = decrypted
+			}
+		}
+
 		if !*skipMedia {
 
 			isIncoming := !evt.Info.IsFromMe
@@ -1301,12 +1239,18 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			replyToMessageID := ""
 
 			// Check for delete messages first
-			if protocolMsg := evt.Message.GetProtocolMessage(); protocolMsg != nil && protocolMsg.GetType() == 0 {
+			if protocolMsg := evt.Message.GetProtocolMessage(); protocolMsg != nil && protocolMsg.GetType() == waE2E.ProtocolMessage_REVOKE {
 				messageType = "delete"
 				if protocolMsg.GetKey() != nil {
 					textContent = protocolMsg.GetKey().GetID() // Store the deleted message ID
 				}
-				log.Info().Str("deletedMessageID", textContent).Str("messageID", evt.Info.ID).Msg("Delete message detected")
+				log.Debug().Str("deletedMessageID", textContent).Str("messageID", evt.Info.ID).Msg("Delete message detected")
+				// Check for message edits
+			} else if edit, ok := historyEdit(evt.Message); ok {
+				messageType = "edit"
+				replyToMessageID = edit.target
+				textContent = edit.text
+				log.Debug().Str("editedMessageID", replyToMessageID).Str("messageID", evt.Info.ID).Msg("Edit message detected")
 				// Check for reactions
 			} else if reaction := evt.Message.GetReactionMessage(); reaction != nil {
 				messageType = "reaction"
@@ -1333,8 +1277,8 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 				textContent = location.GetName()
 			}
 
-			// Extract text content for non-reaction and non-delete messages
-			if messageType != "reaction" && messageType != "delete" {
+			// Extract text content for other message types
+			if messageType != "reaction" && messageType != "delete" && messageType != "edit" {
 				if conv := evt.Message.GetConversation(); conv != "" {
 					textContent = conv
 				} else if ext := evt.Message.GetExtendedTextMessage(); ext != nil {
@@ -1427,7 +1371,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		dowebhook = 1
 		//if evt.Type == events.ReceiptTypeRead || evt.Type == events.ReceiptTypeReadSelf {
 		if evt.Type == types.ReceiptTypeRead || evt.Type == types.ReceiptTypeReadSelf {
-			log.Info().Strs("id", evt.MessageIDs).Str("source", evt.SourceString()).Str("timestamp", fmt.Sprintf("%v", evt.Timestamp)).Msg("Message was read")
+			log.Debug().Strs("id", evt.MessageIDs).Str("source", evt.SourceString()).Str("timestamp", fmt.Sprintf("%v", evt.Timestamp)).Msg("Message was read")
 			//if evt.Type == events.ReceiptTypeRead {
 			if evt.Type == types.ReceiptTypeRead {
 				postmap["state"] = "Read"
@@ -1437,7 +1381,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			//} else if evt.Type == events.ReceiptTypeDelivered {
 		} else if evt.Type == types.ReceiptTypeDelivered {
 			postmap["state"] = "Delivered"
-			log.Info().Str("id", evt.MessageIDs[0]).Str("source", evt.SourceString()).Str("timestamp", fmt.Sprintf("%v", evt.Timestamp)).Msg("Message delivered")
+			log.Debug().Str("id", evt.MessageIDs[0]).Str("source", evt.SourceString()).Str("timestamp", fmt.Sprintf("%v", evt.Timestamp)).Msg("Message delivered")
 		} else {
 			// Discard webhooks for inactive or other delivery types
 			return
@@ -1520,6 +1464,10 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 							if chatJID.Server == types.GroupServer || chatJID.Server == types.BroadcastServer {
 								// Group message: use participant JID
 								senderJID = participantJID
+								if senderJID == "" {
+									// HistorySync may put the sender on WebMessageInfo instead of MessageKey.
+									senderJID = msg.Message.GetParticipant()
+								}
 							} else {
 								// Direct message: sender is the chat itself (chat_jid)
 								senderJID = chatJID.String()
@@ -1544,7 +1492,12 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 						mediaLink := ""
 						quotedMessageID := ""
 
-						if message.GetConversation() != "" {
+						edit, isEdit := historyEdit(message)
+						if isEdit {
+							messageType = "edit"
+							textContent = edit.text
+							quotedMessageID = edit.target
+						} else if message.GetConversation() != "" {
 							messageType = "text"
 							textContent = message.GetConversation()
 						} else if ext := message.GetExtendedTextMessage(); ext != nil {
@@ -1625,7 +1578,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 						} else {
 							if chatJID.Server == types.GroupServer || chatJID.Server == types.BroadcastServer {
 								// Group: use participant JID
-								participant := messageKey.GetParticipant()
+								participant := senderJID
 								if participant != "" {
 									var pErr error
 									senderJIDForInfo, pErr = types.ParseJID(participant)
@@ -1676,7 +1629,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 							"IsDocumentWithCaption": false,
 							"IsLottieSticker":       false,
 							"IsBotInvoke":           false,
-							"IsEdit":                false,
+							"IsEdit":                isEdit,
 							"SourceWebMsg":          nil,
 							"UnavailableRequestID":  "",
 							"RetryCount":            0,
@@ -1746,7 +1699,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	case *events.ChatPresence:
 		postmap["type"] = "ChatPresence"
 		dowebhook = 1
-		log.Info().Str("state", fmt.Sprintf("%s", evt.State)).Str("media", fmt.Sprintf("%s", evt.Media)).Str("chat", evt.MessageSource.Chat.String()).Str("sender", evt.MessageSource.Sender.String()).Msg("Chat Presence received")
+		log.Debug().Str("state", fmt.Sprintf("%s", evt.State)).Str("media", fmt.Sprintf("%s", evt.Media)).Str("chat", evt.MessageSource.Chat.String()).Str("sender", evt.MessageSource.Sender.String()).Msg("Chat Presence received")
 	case *events.CallOffer:
 		postmap["type"] = "CallOffer"
 		dowebhook = 1
@@ -1866,7 +1819,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	case *events.FBMessage:
 		postmap["type"] = "FBMessage"
 		dowebhook = 1
-		log.Info().Str("info", evt.Info.SourceString()).Msg("Facebook message received")
+		log.Debug().Str("info", evt.Info.SourceString()).Msg("Facebook message received")
 	case *events.PairPasskeyRequest:
 		storePendingPasskey(mycli.userID, &PendingPasskeyState{
 			Request: evt,
