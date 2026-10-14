@@ -418,6 +418,14 @@ document.addEventListener('DOMContentLoaded', function() {
           prompt: 'History must be a non-negative integer'
         }]
       },
+      days_to_sync_history: {
+        identifier: 'days_to_sync_history',
+        optional: true,
+        rules: [{
+          type: 'integer[0..365]',
+          prompt: 'History sync days must be an integer between 0 and 365'
+        }]
+      },
       proxy_url: {
         identifier: 'proxy_url',
         optional: true,
@@ -555,6 +563,7 @@ async function addInstance(data) {
     webhook: data.webhook_url || '',
     expiration: 0,
     history: parseInt(data.history) || 0,
+    days_to_sync_history: Number(data.days_to_sync_history || 0),
     proxyConfig: proxyConfig,
     s3Config: s3Config,
     hmacKey: hmacKey
@@ -667,6 +676,7 @@ function updateAdmin() {
         populateInstances(result.data)
       } 
     });
+    loadProxyPool();
   } else {
     // get only active instance status
     status().then((result)=> {
@@ -683,8 +693,9 @@ function handleAdminLogin(token,notifications=false) {
   console.log('Admin login with token:', token);
   setLocalStorageItem('admintoken', token, 6);
   setLocalStorageItem('isAdmin', true, 6);
-  $('.adminlogin').show();
   const currentInstance = getLocalStorageItem("currentInstance");
+  // "Go Back" only makes sense while an instance is open, not on the list.
+  $('.adminlogin').toggle(currentInstance != null);
 
   getUsers().then((result) => {
     if(result.success==true) {
@@ -703,6 +714,7 @@ function handleAdminLogin(token,notifications=false) {
       }
       $('#loading').removeClass('active');
       $('.logingrid').addClass('hidden');
+      loadProxyPool();
       updateAdmin();
     } else {
       removeLocalStorageItem('admintoken');
@@ -1378,7 +1390,7 @@ function populateInstances(instances) {
   const currentInstance = getLocalStorageItem('currentInstance');
 
   if(instances.length==0) {
-    const nodatarow = '<tr><td style="text-align:center;" colspan=5>No instances found</td></tr>'
+    const nodatarow = '<tr><td style="text-align:center;" colspan=6>No instances found</td></tr>'
     tableBody.append(nodatarow);
   }
   instances.forEach((instance, idx) => {
@@ -1389,6 +1401,7 @@ function populateInstances(instances) {
         <td>${instance.name}</td>
         <td><i class="${instance.connected ? 'check green' : 'times red'} icon"></i> <span class="status ${instance.connected}">${instance.connected ? 'Yes' : 'No'}</span></td>
         <td><i class="${instance.loggedIn ? 'check green' : 'times red'} icon"></i> <span class="status ${instance.loggedIn}">${instance.loggedIn ? 'Yes' : 'No'}</span></td>
+        <td>${instanceProxyLabel(instance)}</td>
         <td>
           <button class="ui primary button dashboard-button" onclick="openDashboard('${instance.id}', '${instance.token}')">
             <i class="external alternate icon"></i> Open
@@ -1456,6 +1469,14 @@ function populateInstances(instances) {
                               <div class="header">Proxy URL</div>
                               <div class="content">${instance.proxy_config.proxy_url || 'Not configured'}</div>
                           </div>
+                          ${instance.proxy_pool_id ? `
+                          <div class="item">
+                              <div class="header">Proxy Pool</div>
+                              <div class="content">
+                                  ${instanceProxyLabel(instance)}
+                                  ${getLocalStorageItem('isAdmin') && !instance.connected ? `<button class="ui mini orange button" onclick="releaseProxyPool('${instance.id}')" title="Free this pool slot; a pool proxy is assigned again on the next connect">Release</button>` : ''}
+                              </div>
+                          </div>` : ''}
                           <div class="item">
                               <div class="header">Webhook Proxy</div>
                               <div class="content">${instance.proxy_config.webhook_use_proxy === false ? 'Bypass proxy' : 'Use proxy'}</div>
@@ -1841,6 +1862,7 @@ async function loadHistoryConfig() {
     
     if (res.ok) {
       const data = await res.json();
+      $('#historySyncDays').val(data.data?.days_to_sync_history ?? 0);
       if (data.code === 200 && data.data && data.data.history) {
         const historyConfig = data.data.history;
         $('#history').val(historyConfig);
@@ -1860,10 +1882,17 @@ async function saveHistoryConfig() {
   myHeaders.append('token', token);
   myHeaders.append('Content-Type', 'application/json');
   
-  const historyConfig = parseInt($('#history').val());
+  const historyConfig = Number($('#history').val());
+  const syncDays = Number($('#historySyncDays').val());
+  if (!Number.isInteger(historyConfig) || historyConfig < 0 ||
+      !Number.isInteger(syncDays) || syncDays < 0 || syncDays > 365) {
+    showError('History must be a non-negative integer and sync days must be between 0 and 365.');
+    return;
+  }
   
   const config = {
     history: historyConfig,
+    days_to_sync_history: syncDays,
   };
   
   try {
@@ -1875,7 +1904,7 @@ async function saveHistoryConfig() {
     
     const data = await res.json();
     if (data.success) {
-      showSuccess('History configuration saved successfully');
+      showSuccess('History configuration saved. Sync days apply on the next pairing.');
       $('#modalHistoryConfig').modal('hide');
     } else {
       showError('Failed to save history configuration: ' + (data.error || 'Unknown error'));

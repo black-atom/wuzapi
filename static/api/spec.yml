@@ -212,6 +212,155 @@ paths:
             application/json:
               schema:
                 example: {"code":200,"data":{"id":"4e4942c7dee1deef99ab8fd9f7350de5","jid":"","name":"mariano"},"details":"User instance removed completely","success":true}
+  /admin/proxy-pool:
+    get:
+      tags:
+        - Admin
+      summary: List proxy pool
+      description: Lists the proxies in the pool with their current number of assigned sessions. Proxy passwords are masked.
+      security:
+        - AdminAuth: []
+      responses:
+        200:
+          description: Proxy pool entries
+          content:
+            application/json:
+              schema:
+                example: {"code":200,"data":[{"id":"8b1171837e3035ecbe793409fb58baf2","label":"residential-1","proxy_url":"socks5://user:xxxxx@203.0.113.10:1080","max_devices":2,"enabled":true,"assigned_count":1}],"success":true}
+    post:
+      tags:
+        - Admin
+      summary: Add proxy to pool
+      description: |
+        Adds a proxy to the pool. Sessions that connect without a proxy are assigned the least-loaded enabled pool proxy with free capacity, and keep it on later connects.
+        If the pool has enabled proxies but all are full, /session/connect returns 503, or connects without a proxy when WUZAPI_PROXY_POOL_FALLBACK=direct.
+      security:
+        - AdminAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label:
+                  type: string
+                  example: residential-1
+                proxy_url:
+                  type: string
+                  description: Proxy URL in format "http://host:port" or "socks5://user:pass@host:port"
+                  example: socks5://user:pass@203.0.113.10:1080
+                max_devices:
+                  type: integer
+                  description: Maximum number of sessions assigned to this proxy (default 1)
+                  example: 2
+                enabled:
+                  type: boolean
+                  description: Whether new sessions may be assigned to this proxy (default true)
+                  example: true
+              required:
+                - proxy_url
+      responses:
+        201:
+          description: Proxy added
+          content:
+            application/json:
+              schema:
+                example: {"code":201,"data":{"id":"8b1171837e3035ecbe793409fb58baf2","label":"residential-1","proxy_url":"socks5://user:xxxxx@203.0.113.10:1080","max_devices":2,"enabled":true,"assigned_count":0},"success":true}
+        409:
+          description: proxy_url already exists in the pool
+  /admin/proxy-pool/{id}:
+    put:
+      tags:
+        - Admin
+      summary: Edit proxy in pool
+      description: |
+        Updates a pool entry. All fields are optional. Disabling stops new assignments but keeps existing ones.
+        max_devices cannot be lower than the current assigned_count. Changing proxy_url also updates the sessions assigned to the entry.
+      security:
+        - AdminAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: 8b1171837e3035ecbe793409fb58baf2
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label:
+                  type: string
+                proxy_url:
+                  type: string
+                max_devices:
+                  type: integer
+                enabled:
+                  type: boolean
+            example: {"max_devices":3,"enabled":false}
+      responses:
+        200:
+          description: Proxy updated
+        404:
+          description: Proxy pool entry not found
+        409:
+          description: Duplicate proxy_url, or max_devices lower than the assigned count
+    delete:
+      tags:
+        - Admin
+      summary: Delete proxy from pool
+      description: Deletes a pool entry. Returns 409 while sessions are still assigned to it.
+      security:
+        - AdminAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: 8b1171837e3035ecbe793409fb58baf2
+      responses:
+        200:
+          description: Proxy deleted
+          content:
+            application/json:
+              schema:
+                example: {"code":200,"data":{"id":"8b1171837e3035ecbe793409fb58baf2"},"details":"proxy pool entry deleted successfully","success":true}
+        404:
+          description: Proxy pool entry not found
+        409:
+          description: Proxy is still assigned to sessions
+  /admin/users/{id}/proxy-pool/release:
+    post:
+      tags:
+        - Admin
+      summary: Release a user's pool proxy
+      description: Frees the pool slot held by a disconnected session and clears its proxy. Returns 409 while the session is starting, pairing, reconnecting, or shutting down; disconnect and wait for shutdown first. On its next connect the session is assigned a pool proxy again.
+      security:
+        - AdminAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: ID of the user
+          schema:
+            type: string
+            example: 4e4942c7dee1deef99ab8fd9f7350de5
+      responses:
+        200:
+          description: Assignment released
+          content:
+            application/json:
+              schema:
+                example: {"code":200,"data":{"id":"4e4942c7dee1deef99ab8fd9f7350de5","proxy_pool_id":"8b1171837e3035ecbe793409fb58baf2"},"details":"proxy pool assignment released","success":true}
+        400:
+          description: User has no proxy assigned from the pool
+        409:
+          description: Session is active or its proxy assignment changed concurrently
   /newsletter/list:
     get:
       tags:
@@ -227,6 +376,107 @@ paths:
             application/json:
               schema:
                 example: {"code": 200, "data": {"Newsletter": [{"id": "120363144038483540@newsletter", "state": {"type": "active" }, "thread_metadata": {"creation_time": "1688746895", "description": {"id": "1689653839450668", "text": "WhatsApp's official channel. Follow for our latest feature launches, updates, exclusive drops and more.", "update_time": "1689653839450668" }, "invite": "0029Va4K0PZ5a245NkngBA2M", "name": {"id": "1688746895480511", "text": "WhatsApp", "update_time": "1688746895480511" }, "picture": {"direct_path": "/v/t61.24694-24/416962407_970228831134395_8869146381947923973_n.jpg?ccb=11-4&oh=01_Q5AaIRyTfP806JEGJDm0XWU5E-D4LcA-Wj3csSwh1jJTVanC&oe=67D550F1&_nc_sid=5e03e0&_nc_cat=110", "id": "1707950960975554", "type": "IMAGE", "url": "" }, "preview": {"direct_path": "/v/t61.24694-24/416962407_970228831134395_8869146381947923973_n.jpg?stp=dst-jpg_s192x192_tt6&ccb=11-4&oh=01_Q5AaIawuPXJUw9grRFJZtAJEc6QNm0XpqJq4X1Ssi9xNI0Qf&oe=67D550F1&_nc_sid=5e03e0&_nc_cat=110", "id": "1707950960975554", "type": "PREVIEW", "url": "" }, "settings": {"reaction_codes": {"value": "ALL" } }, "subscribers_count": "0", "verification": "verified" }, "viewer_metadata": {"mute": "on", "role": "subscriber" } } ] }, "success": true }
+  /newsletter/join:
+    post:
+      tags:
+        - Newsletter
+      summary: Join a newsletter
+      description: Follows a WhatsApp channel. The channel JID must use the `@newsletter` server.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - NewsletterJID
+              properties:
+                NewsletterJID:
+                  type: string
+                  example: 120363144038483540@newsletter
+                  description: The WhatsApp channel JID.
+      responses:
+        200:
+          description: Newsletter joined
+          content:
+            application/json:
+              schema:
+                example: {"code": 200, "data": {"Details": "Newsletter joined successfully"}, "success": true}
+        400:
+          description: Invalid or missing newsletter JID
+        500:
+          description: No active session or WhatsApp rejected the operation
+  /newsletter/leave:
+    post:
+      tags:
+        - Newsletter
+      summary: Leave a newsletter
+      description: Unfollows a WhatsApp channel. The channel JID must use the `@newsletter` server.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - NewsletterJID
+              properties:
+                NewsletterJID:
+                  type: string
+                  example: 120363144038483540@newsletter
+                  description: The WhatsApp channel JID.
+      responses:
+        200:
+          description: Newsletter left
+          content:
+            application/json:
+              schema:
+                example: {"code": 200, "data": {"Details": "Newsletter left successfully"}, "success": true}
+        400:
+          description: Invalid or missing newsletter JID
+        500:
+          description: No active session or WhatsApp rejected the operation
+  /newsletter/mute:
+    post:
+      tags:
+        - Newsletter
+      summary: Change newsletter notification settings
+      description: Mutes or unmutes notifications for a WhatsApp channel. The channel JID must use the `@newsletter` server.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - NewsletterJID
+                - Mute
+              properties:
+                NewsletterJID:
+                  type: string
+                  example: 120363144038483540@newsletter
+                  description: The WhatsApp channel JID.
+                Mute:
+                  type: boolean
+                  example: true
+                  description: Set to true to mute notifications, false to unmute them.
+      responses:
+        200:
+          description: Newsletter notification setting changed
+          content:
+            application/json:
+              schema:
+                example: {"code": 200, "data": {"Details": "Newsletter mute status changed successfully"}, "success": true}
+        400:
+          description: Invalid or missing newsletter JID
+        500:
+          description: No active session or WhatsApp rejected the operation
   /webhook:
     get:
       tags:
@@ -338,7 +588,7 @@ paths:
       tags:
         - Session 
       summary: connects to WhatsApp servers
-      description: "Initiates connection to WhatsApp servers.\n\nIf there is no previous session created, it will generate a QR code that can be retrieved via the [qr](#/Session/get_session_qr) API call. Alternatively, the device may initiate passkey pairing instead of QR — in that case, a PasskeyRequest webhook will be sent with the challenge data.\n\nIf the optional Subscribe is supplied it will limit webhooks to the specified event types: Message,ReadReceipt,Presence,HistorySync,ChatPresence.\n\nIf no Subscribe is supplied it will subscribe to All events.\n\nIf Immediate is set to false, the action will wait for 10 seconds to retrieve actual connection status from whatsapp, otherwise it will return immediatly.\n\nWhen setting Immediate to true you should check for actual connection status after a few seconds via the [status](#/Session/get_session_status) API call as your connection might fail if the session was closed from another device."
+      description: "Initiates connection to WhatsApp servers.\n\nIf there is no previous session created, it will generate a QR code that can be retrieved via the [qr](#/Session/get_session_qr) API call. Alternatively, the device may initiate passkey pairing instead of QR — in that case, a PasskeyRequest webhook will be sent with the challenge data.\n\nIf the optional Subscribe is supplied it will limit webhooks to the specified event types: Message,ReadReceipt,Presence,HistorySync,ChatPresence.\n\nIf no Subscribe is supplied it will subscribe to All events.\n\nIf Immediate is set to false, the action will wait for 10 seconds to retrieve actual connection status from whatsapp, otherwise it will return immediatly.\n\nWhen setting Immediate to true you should check for actual connection status after a few seconds via the [status](#/Session/get_session_status) API call as your connection might fail if the session was closed from another device.\n\nIf the session has no proxy and the admin proxy pool is in use, a pool proxy is assigned before connecting."
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -356,6 +606,8 @@ paths:
             application/json:
               schema:
                 example: { "code": 200, "data": { "details": "Connected!", "events": "Message", "jid": "5491155555555.0:53@s.whatsapp.net", "webhook": "https://some.site/webhook?request=parameter" }, "success": true }
+        503:
+          description: Every enabled proxy in the admin proxy pool is at max_devices capacity (not returned when WUZAPI_PROXY_POOL_FALLBACK=direct)
   /session/disconnect:
     post:
       tags:
@@ -639,6 +891,39 @@ paths:
         500:
           description: S3 connection test failed
   /session/history:
+    post:
+      tags:
+        - Session
+      summary: Configure message retention and pairing history
+      description: Save before starting pairing. No active WhatsApp session is required. Omitted fields retain their current values. Sync days affect the next new pairing, not an ordinary reconnect or a QR already issued. Zero preserves WhatsApp default sync behavior; it does not disable incoming HistorySync events.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                history:
+                  type: integer
+                  minimum: 0
+                  description: Local message retention count per chat, independent of sync days.
+                  example: 1000
+                days_to_sync_history:
+                  type: integer
+                  minimum: 0
+                  maximum: 365
+                  description: Requested full history window on next pairing. Availability is determined by WhatsApp and the phone.
+                  example: 30
+      responses:
+        '200':
+          description: Configuration saved
+        '400':
+          description: Missing settings or invalid values
+        '500':
+          description: Database error
     get:
       tags:
         - Session
@@ -1062,8 +1347,15 @@ paths:
     post:
       tags:
         - Chat 
-      summary: Deletes a message sent by user
-      description: Deletes a messages sent by the same user
+      summary: Deletes an own message or another participant's group message
+      description: >-
+        Omit SenderJID (or send an empty string) to delete your own message.
+        To delete another participant's message, use the group JID in Phone and
+        the original author's full PN or LID in SenderJID. The connected WhatsApp
+        account must be a group admin; WhatsApp enforces deletion permissions.
+        Providing your own PN or LID also deletes an own message and does not
+        require group admin privileges. Use the sender identity from the original
+        message event; PN and LID are not automatically interconverted.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -1079,7 +1371,11 @@ paths:
           content:
             application/json:
               schema:
-                example: { "code": 200, "data": { "Details": "Message deleted" }, "success": true }
+                example: { "code": 200, "data": { "Details": "Deleted", "Id": "AABBCC11223344", "Timestamp": 1700000000 }, "success": true }
+        400:
+          description: Missing fields, invalid SenderJID, or another sender outside a group
+        500:
+          description: No session or an error sending the revocation to WhatsApp
   /chat/markread:
     post:
       tags:
@@ -1708,7 +2004,17 @@ paths:
       tags:
         - Chat
       summary: Get chat message history
-      description: Retrieves message history for a specific chat. Returns messages in reverse chronological order (newest first). Requires message history to be enabled on the server.
+      description: |
+        Retrieves message history for a specific chat, newest first. Requires history to be enabled.
+        History contains events, not a materialized view of the latest message contents.
+        An edit is a separate row with message_type `edit`, its own message_id, the target
+        message ID in quoted_message_id, and replacement text or caption in text_content
+        (which can be empty). The original row is not modified. Consumers must apply edits
+        to their targets, using protocolMessage.timestampMS in datajson for edit ordering
+        when available. Database timestamps represent insertion time, including for HistorySync.
+        A limited result may contain an edit without its original message.
+        Live and HistorySync edits use the same fields. Legacy unknown rows are repaired
+        when the same edit is redelivered; existing rows are not scanned or backfilled.
       security:
         - ApiKeyAuth: []
       parameters:
@@ -2325,6 +2631,14 @@ definitions:
             type: integer
             example: 30
 
+      days_to_sync_history:
+        type: integer
+        minimum: 0
+        maximum: 365
+        default: 0
+        example: 30
+        description: "History window requested in days on the next new pairing. 0 uses WhatsApp defaults. Configure before starting pairing; reconnecting an already linked device does not trigger a new full sync. Independent of local history retention."
+
   CreateUser:
     type: object
     required:
@@ -2403,6 +2717,14 @@ definitions:
         example: 0
         description: "Number of messages to store in history per chat for this user. 0 means no history is saved, any positive number enables history storage for that many messages per chat. Default is 0"
         default: 0
+
+      days_to_sync_history:
+        type: integer
+        minimum: 0
+        maximum: 365
+        default: 0
+        example: 30
+        description: "History window requested in days on the next new pairing. 0 uses WhatsApp defaults. Configure before starting pairing; reconnecting an already linked device does not trigger a new full sync. Independent of local history retention."
 
   DeleteUser:
     type: object
@@ -2943,6 +3265,10 @@ definitions:
       FileName:
         type: string
         example: file.txt
+      MimeType:
+        type: string
+        description: Explicit document MIME override. If omitted, uses the declared data URL or HTTP type, then the filename extension, then content detection. Missing, invalid, and generic octet-stream source types fall back; an implicit data URL text/plain default is not a declaration.
+        example: "text/plain"
       Id:
         type: string
         example: "ABCDABCD1234"
@@ -3000,7 +3326,17 @@ definitions:
         example: "1234-abcd-21234"
       Phone:
         type: string
-        example: "5491155553934"
+        description: Destination chat; use the full group JID ending in @g.us for group messages.
+        example: "120363000000000000@g.us"
+      SenderJID:
+        type: string
+        description: >-
+          Optional original message author. Omit or leave empty for own messages.
+          Otherwise provide a numeric user JID ending in @s.whatsapp.net or @lid.
+          Legacy @c.us is normalized to @s.whatsapp.net. Device/agent suffixes are
+          validated and removed. Bare numbers, whitespace, multiple @ signs and
+          group, broadcast or newsletter JIDs are rejected with HTTP 400.
+        example: "5491155553935@s.whatsapp.net"
   Markread:
     type: object
     required:
