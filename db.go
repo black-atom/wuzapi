@@ -135,7 +135,13 @@ type HistoryMessage struct {
 	DataJson        string    `json:"data_json" db:"datajson"`
 }
 
-func (s *server) saveMessageToHistory(userID, chatJID, senderJID, messageID, messageType, textContent, mediaLink, quotedMessageID, dataJson string) error {
+func (s *server) saveMessageToHistory(userID, chatJID, senderJID, messageID string, timestamp time.Time, messageType, textContent, mediaLink, quotedMessageID, dataJson string) error {
+	// timestamp must be the message's own WhatsApp timestamp, not the insert time:
+	// HistorySync redelivers old messages on reconnect and stamping them with
+	// time.Now() made them look recent to /chat/history consumers.
+	if timestamp.IsZero() {
+		timestamp = time.Now()
+	}
 	// Idempotent insert: HistorySync batches (and reconnects) routinely redeliver
 	// messages already persisted via the live Message event. The (user_id, message_id)
 	// unique constraint makes those duplicates an expected condition, not an error,
@@ -146,7 +152,7 @@ func (s *server) saveMessageToHistory(userID, chatJID, senderJID, messageID, mes
 	query := s.db.Rebind(`INSERT INTO message_history (user_id, chat_jid, sender_jid, message_id, timestamp, message_type, text_content, media_link, quoted_message_id, datajson)
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT (user_id, message_id) DO NOTHING`)
-	_, err := s.db.Exec(query, userID, chatJID, senderJID, messageID, time.Now(), messageType, textContent, mediaLink, quotedMessageID, dataJson)
+	_, err := s.db.Exec(query, userID, chatJID, senderJID, messageID, timestamp, messageType, textContent, mediaLink, quotedMessageID, dataJson)
 	if err != nil {
 		return fmt.Errorf("failed to save message to history: %w", err)
 	}
