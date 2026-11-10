@@ -53,13 +53,13 @@ func TestHistoryEditPersistence(t *testing.T) {
 		if err := initializeSchema(db); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.Exec("INSERT INTO users (id,name,token) VALUES ('edit-user','Edit','edit-token')"); err != nil {
+		if _, err := db.Exec("INSERT INTO users (id,name,token,history) VALUES ('edit-user','Edit','edit-token',100)"); err != nil {
 			t.Fatal(err)
 		}
 		s := &server{db: db}
 		save := func(id, kind, text, target, chat string) {
 			t.Helper()
-			if err := s.saveMessageToHistory("edit-user", chat, "sender", id, time.Time{}, kind, text, "", target, `{"edit":true}`); err != nil {
+			if err := s.saveMessageToHistory("edit-user", chat, "sender", id, kind, text, "", target, `{"edit":true}`, time.Time{}); err != nil {
 				t.Fatal(err)
 			}
 		}

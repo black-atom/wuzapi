@@ -12,6 +12,12 @@ import (
 // duplicate row.
 func TestSaveMessageToHistoryIdempotent(t *testing.T) {
 	s := makeTestServer(t)
+	if _, err := s.db.Exec("CREATE TABLE whatsmeow_message_secrets (message_id TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("INSERT INTO users (id,name,token,history) VALUES ('user-1','Test','history-token',100)"); err != nil {
+		t.Fatal(err)
+	}
 
 	const (
 		userID = "user-1"
@@ -21,7 +27,7 @@ func TestSaveMessageToHistoryIdempotent(t *testing.T) {
 	)
 
 	// First insert: a normal live Message event.
-	if err := s.saveMessageToHistory(userID, chat, sender, msgID, time.Time{}, "text", "hello", "", "", "{}"); err != nil {
+	if err := s.saveMessageToHistory(userID, chat, sender, msgID, "text", "hello", "", "", "{}", time.Time{}); err != nil {
 		t.Fatalf("first insert failed: %v", err)
 	}
 
@@ -29,7 +35,7 @@ func TestSaveMessageToHistoryIdempotent(t *testing.T) {
 	// message arriving again in a HistorySync batch or on reconnect. With the
 	// fix this is a silent no-op; without it, it returns a unique-constraint
 	// violation.
-	if err := s.saveMessageToHistory(userID, chat, sender, msgID, time.Time{}, "text", "hello", "", "", "{}"); err != nil {
+	if err := s.saveMessageToHistory(userID, chat, sender, msgID, "text", "hello", "", "", "{}", time.Time{}); err != nil {
 		t.Fatalf("duplicate insert should be a silent no-op, got error: %v", err)
 	}
 
@@ -46,7 +52,7 @@ func TestSaveMessageToHistoryIdempotent(t *testing.T) {
 
 	// A different message_id for the same user must still insert normally
 	// (the conflict clause must not swallow legitimate inserts).
-	if err := s.saveMessageToHistory(userID, chat, sender, "MSG-OTHER", time.Time{}, "text", "world", "", "", "{}"); err != nil {
+	if err := s.saveMessageToHistory(userID, chat, sender, "MSG-OTHER", "text", "world", "", "", "{}", time.Time{}); err != nil {
 		t.Fatalf("insert of a distinct message failed: %v", err)
 	}
 	if err := s.db.Get(&count,
@@ -63,9 +69,15 @@ func TestSaveMessageToHistoryIdempotent(t *testing.T) {
 // time.Now() made them look recent to /chat/history consumers.
 func TestSaveMessageToHistoryKeepsMessageTimestamp(t *testing.T) {
 	s := makeTestServer(t)
+	if _, err := s.db.Exec("CREATE TABLE whatsmeow_message_secrets (message_id TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("INSERT INTO users (id,name,token,history) VALUES ('user-1','Test','history-token',100)"); err != nil {
+		t.Fatal(err)
+	}
 
 	msgTime := time.Now().Add(-72 * time.Hour).Truncate(time.Second)
-	if err := s.saveMessageToHistory("user-1", "123456@s.whatsapp.net", "123456@s.whatsapp.net", "MSG-OLD-1", msgTime, "text", "old", "", "", "{}"); err != nil {
+	if err := s.saveMessageToHistory("user-1", "123456@s.whatsapp.net", "123456@s.whatsapp.net", "MSG-OLD-1", "text", "old", "", "", "{}", msgTime); err != nil {
 		t.Fatalf("insert failed: %v", err)
 	}
 

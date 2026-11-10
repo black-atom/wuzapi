@@ -15,7 +15,7 @@ Be very careful—do not use this to send SPAM or anything similar. Use at your 
 ## Available endpoints
 
 * **Session:** Connect, disconnect, and log out from WhatsApp. Retrieve connection status and QR codes for scanning.
-* **Messages:** Send text, image, audio, document, template, video, sticker, location, contact, and poll messages.
+* **Messages:** Send text, image, audio, document, template, video, sticker, location, contact, poll, and image carousel messages.
 * **Users:** Check if phone numbers have WhatsApp, get user information and avatars, and retrieve the full contact list.
 * **Chat:** Set presence (typing/paused, recording media), mark messages as read, download images from messages, send reactions.
 * **Groups:** Create, delete and list groups, get info, get invite links, set participants, change group photos and names.
@@ -220,6 +220,11 @@ DB_SSLMODE=false
 **For SQLite (default):**
 No database configuration needed - SQLite is used by default if no PostgreSQL settings are provided.
 
+All tables are stored in `dbdata/main.db`. Stop older instances before upgrading:
+existing `users.db` tables are migrated automatically on startup. The migration retains
+`users.db` as a pre-migration copy (it is not kept in sync), runs once, and aborts without
+merging data if an object with the same name already exists in `main.db`.
+
 #### Optional Settings
 ```
 TZ=America/New_York
@@ -229,6 +234,7 @@ WUZAPI_PORT=8080 # Port for the WuzAPI server
 WUZAPI_GLOBAL_WEBHOOK= # Global webhook URL for all instances
 WUZAPI_AUTO_PRESENCE=available # use unavailable to preserve primary-phone push notifications
 WUZAPI_PROXY_POOL_FALLBACK=block # use direct to connect without a proxy when the proxy pool is full
+WUZAPI_HISTORY_TRIM_INTERVAL=1 # trim a chat's history on every Nth saved message
 ```
 
 `WUZAPI_AUTO_PRESENCE` controls the presence announced after a session connects or
@@ -255,6 +261,22 @@ fallback (enabled by default). The environment variable overrides the flag.
 Explicit disconnect, logout, and user deletion stop recovery. No background
 health polling is added; subsequent send failures can trigger another attempt
 after the cooldown if recovery fails.
+
+### App state recovery
+
+WhatsApp syncs chat settings (unread, mute, archive, pin, star, labels) between
+devices as app state collections. When a collection fails verification (for example
+`mismatching LTHash`), it stays broken and writes to it, such as `/chat/unread` or
+`/chat/archive`, fail with `409 conflict`. WuzAPI now repairs it: after a failed
+incremental sync it runs a full resync of that collection (at most once per hour),
+and if a full sync fails it asks the primary phone for a fresh copy of the
+collection (at most once every six hours). The phone only answers while WhatsApp is
+open on it, so writes can keep failing until then. Each step is logged with the user
+ID and collection. Cooldowns are kept in memory per session and reset when a
+recovery completes.
+
+Set `WUZAPI_APPSTATE_RECOVERY=false` or pass `-appstaterecovery=false` to disable it
+(enabled by default). The environment variable overrides the flag.
 
 ### RabbitMQ Integration
 WuzAPI supports sending WhatsApp events to a RabbitMQ queue for global event distribution. When enabled, all WhatsApp events will be published to the specified queue regardless of individual user webhook configurations.
@@ -316,6 +338,17 @@ To interact with the API, you must include the `Authorization` header in HTTP re
 * A Swagger API reference at [/api](/api)
 * A sample web page to connect and scan QR codes at [/login](/login)
 * A fully featured Dashboard to create, manage and test instances at [/dashboard](dashboard)
+
+Message send endpoints accept full phone-number, LID (`@lid`), and group JIDs where supported, in addition to international phone digits. Preserve the full chat JID when replying. See [message destinations and stdio examples](API.md#message-destinations-phone) for resolution rules and unsupported formats.
+
+## Web messaging client
+
+Open **`/client/`** on your WuzAPI server for the Svelte web client: chats,
+contacts, groups, paginated history, attachments, voice recording and playback.
+Sign in with a user token and enable history in client settings to receive
+messages through polling. Browser recordings require HTTPS (or localhost) and
+FFmpeg with libopus on the server. Built assets are included; Node.js is only
+needed to rebuild the interface. See [client setup, development and limits](webclient/README.md).
 
 ## ADMIN Actions
 
@@ -484,27 +517,21 @@ go build .
   </td>
 </tr><tr>
 <td align="center">
-    <a href="https://github.com/luizrgf2">
-      <img src="https://avatars.githubusercontent.com/u/71092163?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>luizrgf2</b></sub>
+    <a href="https://github.com/eliasmeireles">
+      <img src="https://avatars.githubusercontent.com/u/13203692?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>eliasmeireles</b></sub>
     </a>
   </td>
 <td align="center">
-    <a href="https://github.com/andreydruz">
-      <img src="https://avatars.githubusercontent.com/u/976438?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>andreydruz</b></sub>
+    <a href="https://github.com/igortrinidad">
+      <img src="https://avatars.githubusercontent.com/u/13478652?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>igortrinidad</b></sub>
     </a>
   </td>
 <td align="center">
-    <a href="https://github.com/devLucasMoraes">
-      <img src="https://avatars.githubusercontent.com/u/104109951?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>devLucasMoraes</b></sub>
-    </a>
-  </td>
-<td align="center">
-    <a href="https://github.com/RuanAyram">
-      <img src="https://avatars.githubusercontent.com/u/16547662?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>RuanAyram</b></sub>
+    <a href="https://github.com/Alg0rix">
+      <img src="https://avatars.githubusercontent.com/u/53804949?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>Alg0rix</b></sub>
     </a>
   </td>
 <td align="center">
@@ -514,16 +541,40 @@ go build .
     </a>
   </td>
 <td align="center">
-    <a href="https://github.com/Alg0rix">
-      <img src="https://avatars.githubusercontent.com/u/53804949?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>Alg0rix</b></sub>
+    <a href="https://github.com/RuanAyram">
+      <img src="https://avatars.githubusercontent.com/u/16547662?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>RuanAyram</b></sub>
+    </a>
+  </td>
+<td align="center">
+    <a href="https://github.com/devLucasMoraes">
+      <img src="https://avatars.githubusercontent.com/u/104109951?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>devLucasMoraes</b></sub>
     </a>
   </td>
 </tr><tr>
 <td align="center">
-    <a href="https://github.com/igortrinidad">
-      <img src="https://avatars.githubusercontent.com/u/13478652?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>igortrinidad</b></sub>
+    <a href="https://github.com/andreydruz">
+      <img src="https://avatars.githubusercontent.com/u/976438?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>andreydruz</b></sub>
+    </a>
+  </td>
+<td align="center">
+    <a href="https://github.com/luizrgf2">
+      <img src="https://avatars.githubusercontent.com/u/71092163?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>luizrgf2</b></sub>
+    </a>
+  </td>
+<td align="center">
+    <a href="https://github.com/guna64">
+      <img src="https://avatars.githubusercontent.com/u/21063937?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>guna64</b></sub>
+    </a>
+  </td>
+<td align="center">
+    <a href="https://github.com/My-con">
+      <img src="https://avatars.githubusercontent.com/u/123265027?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>My-con</b></sub>
     </a>
   </td>
 <td align="center">
@@ -533,30 +584,18 @@ go build .
     </a>
   </td>
 <td align="center">
-    <a href="https://github.com/claytim">
-      <img src="https://avatars.githubusercontent.com/u/47343472?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>claytim</b></sub>
-    </a>
-  </td>
-<td align="center">
-    <a href="https://github.com/eliasmeireles">
-      <img src="https://avatars.githubusercontent.com/u/13203692?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>eliasmeireles</b></sub>
-    </a>
-  </td>
-<td align="center">
     <a href="https://github.com/jeffersonfelixdev">
       <img src="https://avatars.githubusercontent.com/u/3003222?v=4" width="100px;" style="border-radius:50%;"/><br />
       <sub><b>jeffersonfelixdev</b></sub>
     </a>
   </td>
+</tr><tr>
 <td align="center">
-    <a href="https://github.com/My-con">
-      <img src="https://avatars.githubusercontent.com/u/123265027?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>My-con</b></sub>
+    <a href="https://github.com/claytonhmagalhaess">
+      <img src="https://avatars.githubusercontent.com/u/47343472?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>claytonhmagalhaess</b></sub>
     </a>
   </td>
-</tr><tr>
 <td align="center">
     <a href="https://github.com/paul-lestyo">
       <img src="https://avatars.githubusercontent.com/u/51690314?v=4" width="100px;" style="border-radius:50%;"/><br />
@@ -570,21 +609,15 @@ go build .
     </a>
   </td>
 <td align="center">
+    <a href="https://github.com/lcsztl">
+      <img src="https://avatars.githubusercontent.com/u/120515628?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>lcsztl</b></sub>
+    </a>
+  </td>
+<td align="center">
     <a href="https://github.com/dgattupalli696">
       <img src="https://avatars.githubusercontent.com/u/219828309?v=4" width="100px;" style="border-radius:50%;"/><br />
       <sub><b>dgattupalli696</b></sub>
-    </a>
-  </td>
-<td align="center">
-    <a href="https://github.com/joaosouz4dev">
-      <img src="https://avatars.githubusercontent.com/u/47183663?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>joaosouz4dev</b></sub>
-    </a>
-  </td>
-<td align="center">
-    <a href="https://github.com/gusnips">
-      <img src="https://avatars.githubusercontent.com/u/981265?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>gusnips</b></sub>
     </a>
   </td>
 </tr></table>
@@ -612,8 +645,16 @@ restores WhatsApp's default sync behavior. Values from 0 through 365 are accepte
 Admin user responses and `GET /session/status` expose the saved value.
 
 Sync days and `history` are separate settings: `history` is the local per-chat
-message retention count, not a number of days. The requested window is sent in
-that user's pairing payload; WhatsApp and the phone determine which messages are
+message retention count, not a number of days. A value of 0 disables local
+persistence for live, outgoing, and HistorySync messages without suppressing
+HistorySync webhooks. Positive limits apply to each chat across those sources.
+Enforcing the limit walks the whole chat, so with large limits it can slow saves
+down: `WUZAPI_HISTORY_TRIM_INTERVAL=100` runs it on every 100th saved message
+for each user and chat independently, instead of every message (default 1).
+Counters are kept in memory and reset on restart. A chat can exceed its limit
+between trims; if it stops receiving messages, the excess remains until a future
+save triggers a trim. Use the default of 1 to enforce the limit on every save.
+The requested window is sent in that user's pairing payload; WhatsApp and the phone determine which messages are
 available. Incoming batches use the existing `HistorySync` processing and webhooks.
 Zero sync days does not suppress WhatsApp's normal history events.
 
@@ -698,5 +739,31 @@ use the protocol message's `timestampMS` in `datajson` to order successive edits
 available, since database timestamps record insertion time, including HistorySync.
 A limited response can include an edit without the original message.
 
+### Message send time
+
+Each `/chat/history` row has two times. `timestamp` is when WuzAPI stored the row, so
+every message from a HistorySync gets the sync time. `sent_at` is when the message was
+sent, as reported by WhatsApp: the message's own timestamp for live and HistorySync
+messages, and the server timestamp of the send response for messages sent through the
+API. It is omitted when unknown, including for rows stored before the field existed.
+Results are still ordered by `timestamp`.
+
+PostgreSQL stores `sent_at` as `TIMESTAMPTZ` to preserve the instant across time
+zones. The upgrade treats existing timezone-less values as UTC, preserving their
+previous API interpretation. Values written by older versions running outside UTC
+may already be shifted; the discarded offset cannot be recovered automatically.
+
 Previously imported `unknown` edits are repaired when redelivered. This does not
 backfill existing history or recover events that WhatsApp does not redeliver.
+
+### Recovering an instance with ambiguous device ownership
+
+If deleting an instance fails because several stored WhatsApp devices match the account, the admin dashboard offers **Delete and preserve devices** after the normal deletion confirmation. The second confirmation explains that the instance, message history and files will be removed, while all WhatsApp credentials remain stored and devices stay linked to the phone. Canceling leaves the instance in place; other deletion errors do not offer this recovery action.
+
+Administrators can also call `DELETE /admin/users/{id}/preserve-devices` with the admin `Authorization` header, or use stdio:
+
+```json
+{"jsonrpc":"2.0","id":"recovery-1","method":"admin.users.delete.preserve_devices","params":{"userId":"INSTANCE_ID","adminToken":"ADMIN_TOKEN"}}
+```
+
+This recovery stops the instance without remote logout and preserves every stored device, without choosing among candidates. It requires no manual database edits. To use the number again, create a new instance and pair it again so exact device ownership is recorded. Cleanup of orphaned WhatsApp credentials is separate. See [deletion API and recovery responses](API.md#delete-user) for details and failure behavior.
